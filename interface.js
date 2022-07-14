@@ -106,7 +106,7 @@ htma.add(class FileBrowser {
 					<if#file.type==='folder'>
 						class="file-browser-list-entry-folder"
 					<else>
-						class="file-browser-list-entry-file"
+						class="file-browser-list-entry-file file-browser-list-entry_<var#file.type>"
 					onclick=<fun#handleFileClick(file)>
 					ondblclick=<fun#handleFileDoubleClick(file)>
 					oncontextmenu=<fun#handleFileContext(event,file)>
@@ -232,18 +232,16 @@ const navigate_forth = args => {
 	args.selection = []
 }
 
-const select_file_to_save = ({ path }) => file_browser({ path, multiple: false, type: 'newFile', selectLabel: 'Save' })
-const select_file = ({ path, multiple = false }) => file_browser({ path, multiple, type: 'file', selectLabel: 'Open' })
-const select_folder = ({ path, multiple = false }) => file_browser({ path, multiple, type: 'folder', selectLabel: 'Open' })
+const select_file_to_save = ({ path, selection = [] }) => file_browser({ path, selection, multiple: false, type: 'newFile', selectLabel: 'Save' })
+const select_file = ({ path, multiple = false, selection = [] }) => file_browser({ path, selection, multiple, type: 'file', selectLabel: 'Open' })
+const select_folder = ({ path, multiple = false, selection = [] }) => file_browser({ path, selection, multiple, type: 'folder', selectLabel: 'Open' })
 
-const file_browser = ({ path, multiple = false, type = 'file', selectLabel = 'Select' }) => {
+const file_browser = ({ path, selection = [], multiple = false, type = 'file', selectLabel = 'Select' }) => {
 	// Select folder or folders
 	const concatPath = (path, sub) =>
 		'/'+path.split('/').filter(a => a).concat([sub]).join('/')
-	const onSelected = []
-	const selected = (selection) => {
-		onSelected.forEach(callback => callback(selection))
-	}
+	let selected;
+	const onSelected = new Promise(resolve => {selected = resolve})
 	const container = document.createElement('div')
 	const contextContainer = document.createElement('div')
 	const confirmContainer = document.createElement('div')
@@ -310,7 +308,7 @@ const file_browser = ({ path, multiple = false, type = 'file', selectLabel = 'Se
 		selectionType: type,
 		history: [],
 		future: [],
-		selection: [],
+		selection: Array.isArray(selection) ? [...selection] : [selection],
 		onselect: (newSelection) => {
 			if (args.multiple)
 				args.selection.push(newSelection)
@@ -364,16 +362,12 @@ const file_browser = ({ path, multiple = false, type = 'file', selectLabel = 'Se
 	document.body.appendChild(contextContainer)
 	document.body.appendChild(confirmContainer)
 	reRender()
-	return {
-		close() {
-			container.remove()
-			contextContainer.remove()
-			confirmContainer.remove()
-		},
-		then(callback) {
-			onSelected.push(callback)
-		}
+	onSelected.close = () => {
+		container.remove()
+		contextContainer.remove()
+		confirmContainer.remove()
 	}
+	return onSelected
 }
 
 

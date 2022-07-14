@@ -62,6 +62,21 @@ window.fs = (() => {
 		}
 	}
 
+
+	class Index {
+		#id = 0
+		constructor(id) {
+			this.#id = id
+		}
+		get contents () {
+			return Object.values(children[this.#id])
+				.map(({ id }) => {
+					const { parent, ...parentRemoved } = index[id]
+					return parentRemoved
+				})
+		}
+	}
+
 	const next_id = () => {last_id++;return last_id}
 	const split_path = ({ path }) => path.split('/').filter(a=>a)
 	const normalise_path = ({ path }) => split_path({ path }).join('/')
@@ -87,7 +102,14 @@ window.fs = (() => {
 		dataTypes[name] = constructor
 	}
 
-	const create_child = ({ parent, name, isLeaf }) => {
+	const get_path_exists = ({ path }) => {
+		const {parent,remainder} = get_last_parent({ path })
+		if (remainder) return false
+		const dat = index[parent]
+		return dat.type
+	}
+
+	const PROT_create_child = ({ parent, name, isLeaf, protocol }) => {
 		const childs = children[parent]
 		if (name in childs) throw new Error()
 		const id = next_id()
@@ -98,7 +120,7 @@ window.fs = (() => {
 				parent, name, created: Date.now(), modified: Date.now(), type: 'file'
 			}
 			index[id] = dat
-			localStorage.setItem(FILE+id, JSON.stringify(dat))
+			protocol.set(id, dat)
 		} else {
 			const newChildren = {}
 			childs[name] = {id,children:newChildren}
@@ -107,22 +129,22 @@ window.fs = (() => {
 				parent, name, created: Date.now(), modified: Date.now(), type: 'folder'
 			}
 			index[id] = dat
-			localStorage.setItem(FILE+id, JSON.stringify(dat))
+			protocol.set(id, dat)
 		}
 
 		return id
 	}
-	const create_path = ({ path, isLeaf }) => {
+	const PROT_create_path = ({ path, isLeaf, protocol }) => {
 		const { parent, remainder } = get_last_parent({ path })
 		return split_path({ path: remainder })
 		.reduce((par, name, i, list) =>
-			create_child({ parent: par, name, isLeaf: isLeaf && i===list.length-1 }),
+			PROT_create_child({ parent: par, name, isLeaf: isLeaf && i===list.length-1, protocol }),
 			parent)
 	}
 
-	const save_data_to_path = ({ path, data, type }) => {
+	const PROT_save_data_to_path = ({ path, data, type, protocol }) => {
 		const {parent,remainder} = get_last_parent({ path })
-		const id = remainder ? create_path({ path, isLeaf: Boolean(data) }) : parent
+		const id = remainder ? PROT_create_path({ path, isLeaf: Boolean(data), protocol }) : parent
 		if (data) {
 			const dat = index[id]
 			if (dat.type === 'folder')
@@ -135,26 +157,11 @@ window.fs = (() => {
 				dat.type = 'file'
 			}
 			dat.modified = Date.now()
-			localStorage.setItem(FILE+id, JSON.stringify(dat))
-			localStorage.setItem(FILE+DATA+id, JSON.stringify(data))
+			protocol.setData(id, dat, data)
 		}
 	}
 
-	class Index {
-		#id = 0
-		constructor(id) {
-			this.#id = id
-		}
-		get contents () {
-			return Object.values(children[this.#id])
-				.map(({ id }) => {
-					const { parent, ...parentRemoved } = index[id]
-					return parentRemoved
-				})
-		}
-	}
-
-	const get_data_from_path = ({ path }) => {
+	const PROT_get_data_from_path = ({ path, protocol }) => {
 		// if path is not leaf, return an index object as data
 		const {parent,remainder} = get_last_parent({ path })
 		if (remainder) throw new Error(`This path does not exist`)
@@ -162,23 +169,22 @@ window.fs = (() => {
 		if (dat.type === 'folder') {
 			return new Index(parent)
 		} else {
-			const parsed = JSON.parse(localStorage.getItem(FILE+DATA+parent))
+			if ((protocol.name === 'all' && !protocols.any.hasData(parent)) || (protocol.name !== 'all' && !protocol.hasData(parent)))
+				return;
+			const parsed = protocol.get(parent)
 			if (dat.type === 'file')
 				return parsed
 			else if (!dataTypes[dat.type])
 				throw new Error(`Data type '${dat.type}' is not registered`)
+			if (protocol.name === 'all') {
+				return Object.fromEntries(Object.entries(parsed).map(([ protocol, result ]) =>
+					[ protocol, dataTypes[dat.type](result) ]))
+			}
 			return dataTypes[dat.type](parsed)
 		}
 	}
 
-	const get_path_exists = ({ path }) => {
-		const {parent,remainder} = get_last_parent({ path })
-		if (remainder) return false
-		const dat = index[parent]
-		return dat.type
-	}
-
-	const delete_id = ({ id }) => {
+	const PROT_delete_id = ({ id, protocol }) => {
 		const dat = index[id]
 		if (dat.type === 'folder') {
 			Object.values(children[id]).forEach(delete_id)
@@ -187,20 +193,19 @@ window.fs = (() => {
 		delete children[dat.parent][dat.name]
 		delete index[id]
 		delete children[id]
-		localStorage.removeItem(FILE+id)
 
-		if (dat.type !== 'folder') {
-			localStorage.removeItem(FILE+DATA+id)
-		}
+		if (dat.type === 'folder')
+			protocol.del(id)
+		else protocol.delData(id)
 	}
 
-	const delete_path = ({ path }) => {
+	const PROT_delete_path = ({ path, protocol }) => {
 		const {parent,remainder} = get_last_parent({ path })
 		if (remainder) throw new Error(`This path does not exist`)
-		delete_id({ id: parent })
+		PROT_delete_id({ id: parent, protocol })
 	}
 
-	const move_path_to_path = ({ path, newPath }) => {
+	const PROT_move_path_to_path = ({ path, newPath, protocol }) => {
 		const normal_path = normalise_path({ path })
 		const normal_newPath = normalise_path({ path: newPath })
 
@@ -220,24 +225,249 @@ window.fs = (() => {
 
 		// Delete anything already at the new path
 		if (get_path_exists({ path: newPath }))
-			delete_path({ path: newPath })
+			PROT_delete_path({ path: newPath, protocol })
 
 		// Create new parent path
 		const splitPath = split_path({ path: newPath })
 		const parentPath = splitPath.slice(0,-1).join('/')
 		const {parent,remainder} = get_last_parent({ path: parentPath })
-		const parentId = remainder ? create_path({ path: parentPath, isLeaf: false }) : parent
+		const parentId = remainder ? PROT_create_path({ path: parentPath, isLeaf: false, protocol }) : parent
 
 		// change parent and name
 		const newName = splitPath.slice(-1)[0]
 		dat.name = newName
 		dat.parent = parentId
 		dat.modified = Date.now()
-		localStorage.setItem(FILE+id, JSON.stringify(dat))
+		protocol.set(id, dat)
 	}
 
 
+	const data_store = {}
 
+	const protocol_priority = ['file','data']
+	const protocols = {
+		file: {
+			name: 'file',
+			has: (id) => {
+				return localStorage.hasOwnProperty(FILE+id)
+			},
+			hasData: (id) => {
+				return localStorage.hasOwnProperty(FILE+DATA+id)
+			},
+			get: (id) => {
+				return JSON.parse(localStorage.getItem(FILE+DATA+id))
+			},
+			set: (id, metadata) => {
+				localStorage.setItem(FILE+id, JSON.stringify(metadata))
+			},
+			setData: (id, metadata, data) => {
+				localStorage.setItem(FILE+id, JSON.stringify(metadata))
+				localStorage.setItem(FILE+DATA+id, JSON.stringify(data))
+			},
+			del: (id) => {
+				localStorage.removeItem(FILE+id)
+			},
+			delData: (id) => {
+				localStorage.removeItem(FILE+id)
+				localStorage.removeItem(FILE+DATA+id)
+			}
+		},
+		data: {
+			name: 'data',
+			hasData: (id) => {
+				return id in data_store
+			},
+			has: (id) => {
+				return false
+			},
+			get: (id) => {
+				return JSON.parse(data_store[id])
+			},
+			set: (id, metadata) => {
+				// localStorage.setItem(FILE+id, JSON.stringify(metadata))
+			},
+			setData: (id, metadata, data) => {
+				// localStorage.setItem(FILE+id, JSON.stringify(metadata))
+				// localStorage.setItem(FILE+DATA+id, JSON.stringify(data))
+				data_store[id] = JSON.stringify(data)
+			},
+			del: (id) => {
+				// localStorage.removeItem(FILE+id)
+			},
+			delData: (id) => {
+				// localStorage.removeItem(FILE+id)
+				// localStorage.removeItem(FILE+DATA+id)
+				delete data_store[id]
+			}
+		},
+		any: {
+			name: 'any',
+			has: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].has
+					if (!funct) continue;
+					const result = funct(id)
+					if (!result) continue;
+					return true
+				}
+			},
+			hasData: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].hasData
+					if (!funct) continue;
+					const result = funct(id)
+					if (!result) continue;
+					return true
+				}
+			},
+			get: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].get
+					if (!funct) continue;
+					if (!(protocols[protocol].hasData && protocols[protocol].hasData(id)))
+						continue;
+					const result = funct(id)
+					if (!result) continue;
+					return result
+				}
+			},
+			set: (id, metadata) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].set
+					if (!funct) continue;
+					return funct(id, metadata)
+				}
+			},
+			setData: (id, metadata, data) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].setData
+					if (!funct) continue;
+					return funct(id, metadata, data)
+				}
+			},
+			del: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].del
+					if (!funct) continue;
+					return funct(id)
+				}
+			},
+			delData: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].delData
+					if (!funct) continue;
+					return funct(id)
+				}
+			}
+		},
+		all: {
+			name: 'all',
+			has: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].has
+					if (!funct) continue;
+					const result = funct(id)
+					if (!result) return false
+				}
+				return true
+			},
+			hasData: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].hasData
+					if (!funct) continue;
+					const result = funct(id)
+					if (!result) return false
+				}
+				return true
+			},
+			get: (id) => {
+				const results = {}
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].get
+					if (!funct) continue;
+					if (!(protocols[protocol].hasData && protocols[protocol].hasData(id)))
+						continue;
+					const result = funct(id)
+					if (!result) continue;
+					results[protocol] = result
+				}
+				return results
+			},
+			set: (id, metadata) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].set
+					if (!funct) continue;
+					funct(id, metadata)
+				}
+			},
+			setData: (id, metadata, data) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].setData
+					if (!funct) continue;
+					funct(id, metadata, data)
+				}
+			},
+			del: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].del
+					if (!funct) continue;
+					funct(id)
+				}
+			},
+			delData: (id) => {
+				for (const protocol of protocol_priority) {
+					const funct = protocols[protocol].delData
+					if (!funct) continue;
+					funct(id)
+				}
+			}
+		}
+	}
+	const getProtocolPath = (path, protocol) => {//}, action) => {
+		protocol = Object.keys(protocols).find(prot => path.slice(0,prot.length+3) === `${prot}://`) || protocol
+		path = path.replace(/^([a-z]+:)\/\//, '')
+
+		const protocolPaths = protocols[protocol]
+		if (!protocolPaths)
+			throw new Error(`Unsupported protocol: '${protocol}'`)
+
+		return {
+			protocol,
+			path
+		}
+	}
+	const delete_path = ({ path, protocol = 'all' }) => {
+		const protocolPath = getProtocolPath(path, protocol)
+		return PROT_delete_path({
+			path: protocolPath.path,
+			protocol: protocols[protocolPath.protocol]
+		})
+	}
+	const save_data_to_path = ({ path, data, type, protocol = 'file' }) => {
+		const protocolPath = getProtocolPath(path, protocol)
+		return PROT_save_data_to_path({
+			path: protocolPath.path,
+			protocol: protocols[protocolPath.protocol],
+			data,
+			type
+		})
+	}
+	const get_data_from_path = ({ path, protocol = 'any' }) => {
+		const protocolPath = getProtocolPath(path, protocol)
+		return PROT_get_data_from_path({
+			path: protocolPath.path,
+			protocol: protocols[protocolPath.protocol]
+		})
+	}
+	const move_path_to_path = ({ path, newPath, protocol = 'any' }) => {
+		// PROT_move_path_to_path
+		console.warn('TODO: change protocols?')
+		// const protocolPath = getProtocolPath(path, protocol, 'move_path_to_path')
+		// protocolPath.action({
+		// 	path: protocolPath.path,
+		// 	newPath:
+		// })
+	}
 
 	initialize();
 
